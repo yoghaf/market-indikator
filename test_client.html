@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Market Indikator - Test Client</title>
+    <script src="https://cdn.jsdelivr.net/npm/@msgpack/msgpack@3.0.0-beta2/dist.es5+umd/msgpack.min.js"></script>
+    <style>
+        body { font-family: monospace; background: #1a1a2e; color: #0f0; padding: 20px; }
+        h1 { color: #e94560; }
+        #status { color: #eee; margin-bottom: 10px; }
+        #log { max-height: 600px; overflow-y: auto; border: 1px solid #333; padding: 10px; }
+        .trade { margin: 2px 0; }
+        .buy { color: #00ff88; }
+        .sell { color: #ff4444; }
+    </style>
+</head>
+<body>
+    <h1>Market Indikator - Live Trades</h1>
+    <div id="status">Connecting...</div>
+    <div id="log"></div>
+
+    <script>
+        const log = document.getElementById('log');
+        const status = document.getElementById('status');
+
+        function connect() {
+            const ws = new WebSocket('ws://localhost:8080/ws');
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                status.textContent = 'Connected';
+                status.style.color = '#0f0';
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = MessagePack.decode(new Uint8Array(event.data));
+                    // data = [ID, Price, Quantity, Time, IsBuyer]
+                    const [id, price, qty, time, isBuyer] = data;
+                    const side = isBuyer ? 'SELL' : 'BUY';
+                    const cls = isBuyer ? 'sell' : 'buy';
+                    const el = document.createElement('div');
+                    el.className = `trade ${cls}`;
+                    el.textContent = `${new Date(time).toISOString()} | ${side} | $${price.toFixed(2)} | ${qty.toFixed(4)} BTC`;
+                    log.prepend(el);
+                    // Keep max 500 entries
+                    while (log.children.length > 500) log.removeChild(log.lastChild);
+                } catch (e) {
+                    console.error('Decode error:', e);
+                }
+            };
+
+            ws.onclose = () => {
+                status.textContent = 'Disconnected. Reconnecting in 2s...';
+                status.style.color = '#ff0';
+                setTimeout(connect, 2000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('WS error:', err);
+                ws.close();
+            };
+        }
+
+        connect();
+    </script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Logs
+logs/
+!logs/.gitkeep
+*.log
+
+# Environment variables
+.env
+
+# Dependencies
+node_modules/
+web/dist/
+web/node_modules/
+vendor/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Temporary files
+tmp/
+temp/
