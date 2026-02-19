@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"market-indikator/internal/model"
+	"market-indikator/internal/state"
 
 	"github.com/gorilla/websocket"
 )
@@ -17,16 +18,17 @@ var upgrader = websocket.Upgrader{
 
 // Broadcaster receives Snapshots from the engine and fans them out to WS clients.
 type Broadcaster struct {
-	input <-chan model.Snapshot
+	input  <-chan model.Snapshot
+	buffer *state.RingBuffer
 }
 
-func NewBroadcaster(input <-chan model.Snapshot) *Broadcaster {
-	return &Broadcaster{input: input}
+func NewBroadcaster(input <-chan model.Snapshot, buffer *state.RingBuffer) *Broadcaster {
+	return &Broadcaster{input: input, buffer: buffer}
 }
 
 // Start launches the broadcast loop and HTTP server.
 func (b *Broadcaster) Start(addr string) {
-	hub := newHub()
+	hub := newHub(b.buffer)
 	go hub.run(b.input)
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -44,13 +46,15 @@ type Hub struct {
 	clients    map[*Client]bool
 	register   chan *Client
 	unregister chan *Client
+	buffer     *state.RingBuffer
 }
 
-func newHub() *Hub {
+func newHub(buffer *state.RingBuffer) *Hub {
 	return &Hub{
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		clients:    make(map[*Client]bool),
+		buffer:     buffer,
 	}
 }
 
@@ -68,7 +72,6 @@ func (h *Hub) run(input <-chan model.Snapshot) {
 			}
 		case snap := <-input:
 			// Serialize ONCE per snapshot.
-			// 128 bytes is enough for the full enriched snapshot.
 			msg := snap.AppendMsgPack(make([]byte, 0, 128))
 
 			// Fan-out to all connected clients.
@@ -76,9 +79,9 @@ func (h *Hub) run(input <-chan model.Snapshot) {
 				select {
 				case client.send <- msg:
 				default:
-					// Slow client — drop to preserve system latency
-					close(client.send)
-					delete(h.clients, client)
+					// Slow client — drop this tick, don't kill.
+					// Client will catch up on next tick.
+					// Dead clients are cleaned up via readPump.
 				}
 			}
 		}
@@ -91,13 +94,56 @@ type Client struct {
 	send chan []byte
 }
 
+// ═══════════════════════════════════════════════════════════════
+// STREAMING HISTORY PROTOCOL
+// ═══════════════════════════════════════════════════════════════
+//
+// Instead of sending one giant MsgPack array (which blocks JS decode),
+// we stream history as individual small messages:
+//
+//   Message 1: MsgPack uint32 = count of history snapshots
+//   Message 2..N+1: Individual FixArray(9) snapshots (~128 bytes each)
+//   After: Client registered for live FixArray(9) ticks
+//
+// Frontend detects the header (typeof decoded === 'number') and
+// shows a loading progress bar until all history snapshots arrive.
+// Each individual message decodes in <0.1ms — zero main thread blocking.
+
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
+	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 4096)}
+
+	// Send full history BEFORE registering for live ticks
+	if hub.buffer != nil {
+		snapshots := hub.buffer.GetAll()
+		if len(snapshots) > 0 {
+			// 1. Send count header (MsgPack uint32: 0xce + 4 bytes big-endian)
+			n := uint32(len(snapshots))
+			header := []byte{0xce, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
+			if err := conn.WriteMessage(websocket.BinaryMessage, header); err != nil {
+				log.Printf("Failed to send history header: %v", err)
+				conn.Close()
+				return
+			}
+
+			// 2. Stream each snapshot as individual message
+			for _, snap := range snapshots {
+				msg := snap.AppendMsgPack(make([]byte, 0, 128))
+				if err := conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+					log.Printf("History stream interrupted after %d snapshots: %v", n, err)
+					conn.Close()
+					return
+				}
+			}
+			log.Printf("Streamed %d history snapshots to new client", len(snapshots))
+		}
+	}
+
+	// Register for live ticks
 	client.hub.register <- client
 
 	go client.writePump()

@@ -292,6 +292,7 @@ export default function App() {
   });
   const [evts, setEvts] = useState([]);
   const [cvdH, setCvdH] = useState([]);
+  const [wsLoading, setWsLoading] = useState({ active: true, current: 0, total: 0 });
 
   // Refs for performance
   const dR = useRef({
@@ -300,6 +301,7 @@ export default function App() {
     fs: 0, htf: [0, 0, 0, 0, 0, 0, 0], htfCandles: [], ticks: 0, lat: 0,
   });
   const eB = useRef([]), eE = useRef(mkEE()), sT = useRef(0), tR = useRef(null);
+  const historyLoadingRef = useRef(true);
 
   const onSnap = useCallback(s => {
     // Determine which candle to feed to chart
@@ -310,7 +312,13 @@ export default function App() {
     
     const now = performance.now();
     const ne = eE.current(s);
-    if (ne.length) { if (chartRef.current) for (const e of ne) if (e.mk) chartRef.current.addMarker(e.time, e.mk.t, e.mk.x); eB.current.push(...ne); }
+    if (ne.length) {
+      // Chart markers only during live (history would add hundreds)
+      if (!historyLoadingRef.current && chartRef.current) {
+        for (const e of ne) if (e.mk) chartRef.current.addMarker(e.time, e.mk.t, e.mk.x);
+      }
+      eB.current.push(...ne);
+    }
     const d = dR.current;
     
     d.price = s.price; d.cvd = s.cvd; d.delta1s = s.candle1s.delta; d.delta1m = s.candle1m.delta;
@@ -332,7 +340,13 @@ export default function App() {
     }, 250);
   }, [chartTF]); // Re-create callback when chartTF changes to switch feed immediately
 
-  useTradeStream(onSnap);
+  // Loading state callback from useTradeStream
+  const onLoadingChange = useCallback((active, current, total) => {
+    historyLoadingRef.current = active;
+    setWsLoading({ active, current, total });
+  }, []);
+
+  useTradeStream(onSnap, onLoadingChange);
   const onChart = useCallback(api => { chartRef.current = api; }, []);
 
   // Liquidation feed — inject into event buffer
@@ -418,7 +432,23 @@ export default function App() {
   return (
     <div className={`T ${theme}`}>
 
-
+      {/* ═══ LOADING OVERLAY ═══ */}
+      {wsLoading.active && (
+        <div className="LOAD-overlay">
+          <div className="LOAD-content">
+            <div className="LOAD-orb" />
+            <div className="LOAD-text">{wsLoading.total > 0 ? 'LOADING HISTORY' : 'CONNECTING TO FEED...'}</div>
+            <div className="LOAD-sub">
+              {wsLoading.total > 0 ? `${wsLoading.current.toLocaleString()} / ${wsLoading.total.toLocaleString()} snapshots` : 'Establishing connection'}
+            </div>
+            {wsLoading.total > 0 && (
+              <div className="LOAD-bar">
+                <div className="LOAD-fill" style={{ width: `${(wsLoading.current / wsLoading.total * 100)}%` }} />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
         {/* ═══ HEADER ═══ */}
       <header className="H">
         <div className="HL">

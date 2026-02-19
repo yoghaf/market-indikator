@@ -15,11 +15,17 @@ import (
 	"market-indikator/internal/model"
 	oi "market-indikator/internal/oi"
 	"market-indikator/internal/orderbook"
+	"market-indikator/internal/state"
+)
+
+const (
+	bufferSize = 3600 // 1 hour of 1s snapshots
+	logDir     = "logs"
 )
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	log.Println("Starting Market Indikator v5 (CVD + Delta + Orderbook + OI + Logger)...")
+	log.Println("Starting Market Indikator v6 (Stateful Snapshot Engine)...")
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -38,19 +44,29 @@ func main() {
 	// 5. Snapshot Logger (async, zero hot-path impact)
 	snapLogger := csvlogger.NewLogger()
 
-	// 6. Start Binance AggTrade Ingest
+	// 6. Snapshot Ring Buffer (in-memory state for new clients)
+	snapBuffer := state.NewRingBuffer(bufferSize)
+
+	// 7. Load history from CSV on startup (restart recovery)
+	csvSnapshots := state.LoadFromCSV(logDir, bufferSize)
+	for _, snap := range csvSnapshots {
+		snapBuffer.Add(snap)
+	}
+	log.Printf("Ring buffer pre-loaded with %d snapshots from CSV", snapBuffer.Size())
+
+	// 8. Start Binance AggTrade Ingest
 	ingester := ingest.NewIngester(eventBus)
 	ingester.Start(ctx)
 
-	// 7. Start Binance Depth Ingest
+	// 9. Start Binance Depth Ingest
 	depthIngester := ingest.NewDepthIngester(book)
 	depthIngester.Start(ctx)
 
-	// 8. Start OI Poller (reads latest price from engine via closure)
+	// 10. Start OI Poller (reads latest price from engine via closure)
 	oiPoller := ingest.NewOIPoller(oiEngine, eng.GetPrice)
 	oiPoller.Start(ctx)
 
-	// 9. Engine goroutine — single owner, no locks
+	// 11. Engine goroutine — single owner, no locks
 	tradeCh := eventBus.Subscribe(1024)
 	snapshotCh := make(chan model.Snapshot, 1024)
 
@@ -58,6 +74,9 @@ func main() {
 		var lastLogTime int64
 		for trade := range tradeCh {
 			snap := eng.ProcessTrade(trade)
+
+			// Push to ring buffer (thread-safe)
+			snapBuffer.Add(snap)
 
 			// Broadcast to WebSocket clients (non-blocking)
 			select {
@@ -74,11 +93,11 @@ func main() {
 		}
 	}()
 
-	// 10. Broadcaster
-	broadcaster := broadcast.NewBroadcaster(snapshotCh)
+	// 12. Broadcaster (now with ring buffer for snapshot history)
+	broadcaster := broadcast.NewBroadcaster(snapshotCh, snapBuffer)
 	go broadcaster.Start(":8080")
 
-	// 11. Shutdown
+	// 13. Shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
