@@ -1,7 +1,17 @@
 import { useRef, useCallback } from 'react';
 import { decode } from '@msgpack/msgpack';
 
-const WS_URL = `ws://${window.location.hostname}:8080/ws`;
+const getWsUrl = () => {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // If running on Vite dev server (port 5173), hardcode to backend port 8080
+  if (window.location.port === '5173') {
+    return `ws://${window.location.hostname}:8080/ws`;
+  }
+  // Otherwise (production/ngrok), use same host/port relative path
+  return `${protocol}//${window.location.host}/ws`;
+};
+
+const WS_URL = getWsUrl();
 const RECONNECT_DELAY_MS = 2000;
 
 /**
