@@ -133,9 +133,11 @@ func (e *Engine) ProcessTrade(t model.Trade) model.Snapshot {
 	// ─── CVD ───
 	var delta float64
 	if t.IsBuyer {
-		delta = qty
-	} else {
+		// IsBuyer=true means "Maker was Buyer". This means the taker (aggressor) was a Seller.
 		delta = -qty
+	} else {
+		// IsBuyer=false means "Maker was Seller". This means the taker (aggressor) was a Buyer.
+		delta = qty
 	}
 	e.CVD += delta
 	e.LastPrice = price
