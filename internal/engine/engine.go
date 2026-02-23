@@ -133,9 +133,9 @@ func (e *Engine) ProcessTrade(t model.Trade) model.Snapshot {
 	// ─── CVD ───
 	var delta float64
 	if t.IsBuyer {
-		delta = -qty
-	} else {
 		delta = qty
+	} else {
+		delta = -qty
 	}
 	e.CVD += delta
 	e.LastPrice = price
